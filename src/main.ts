@@ -9,12 +9,14 @@ import { Autopilot } from './game/autopilot';
 import { BIRDS, BIRD_ORDER, type BirdId } from './game/birds';
 import { STEP } from './game/constants';
 import { LEVELS, THEME_SONG, levelById, nextLevel, type LevelDef, type ThemeId } from './game/levels';
+import { encodeLog } from './game/replay';
 import { Progress } from './game/progress';
 import { randomSeed } from './game/rng';
 import { Run, starsFor, type ClearResult } from './game/Run';
 import { detectLang, setLang, t, type Lang, type StringKey } from './i18n';
 import { bindInput } from './input';
 import { createClient, loadName, myEntries, newGameId, rememberEntry, saveName, scoresUrl } from './net/leaderboard';
+import { StarsStore } from './net/stars';
 import { Effects } from './render/effects';
 import { birdPix } from './render/sprites/birds';
 import { FEATHERS, Renderer } from './render/renderer';
@@ -157,7 +159,7 @@ function toMenu(screen: 'title' | 'map' | 'birds' | 'board' = 'title'): void {
   if (screen === 'title') ui.showTitle();
   else if (screen === 'map') ui.showMap();
   else if (screen === 'birds') ui.showBirds(() => toMenu(menuScreen));
-  else ui.showBoard(() => toMenu('title'));
+  else ui.showBoard(() => toMenu('title'), 'adventure');
 }
 
 function showReady(r: Run): void {
@@ -200,6 +202,10 @@ function onClearing(r: Run): void {
 function onCleared(r: Run, res: ClearResult): void {
   if (r !== run || !r.def) return;
   const outcome = progress.record(res);
+  // Keep the flight behind the best clear of each level: the leaderboard replays it.
+  const segs = r.replay()?.map(encodeLog);
+  if (segs) stars.offer(r.def.id, { bird: BIRD_ORDER.indexOf(r.bird.id), stars: res.stars, coins: res.coins, segs });
+  void syncStars();
   const next = nextLevel(r.def.id);
   ui.setPauseVisible(false);
   ui.showResults({ result: res, outcome, def: r.def, hasNext: !!next, allCleared: progress.allCleared }, (i) => sfx.star(i));
@@ -218,7 +224,14 @@ const ui = new Ui(
     continueLevel: () => startLevel(progress.frontier),
     endless: () => startEndless(),
     birds: () => ui.showBirds(() => toMenu(menuScreen)),
-    board: () => ui.showBoard(() => (mode === 'play' && lastOver && run.mode === 'endless' && run.phase === 'dead' ? ui.showEndlessOver(lastOver) : toMenu('title'))),
+    board: (from) =>
+      ui.showBoard(
+        () => {
+          if (from === 'over' && lastOver && mode === 'play' && run.mode === 'endless' && run.phase === 'dead') ui.showEndlessOver(lastOver);
+          else toMenu(from === 'map' ? 'map' : 'title');
+        },
+        from === 'over' ? 'endless' : 'adventure',
+      ),
     map: () => toMenu('map'),
     title: () => toMenu('title'),
     play: (def) => startLevel(def),
@@ -247,9 +260,54 @@ const ui = new Ui(
   progress,
 );
 
-// ---- Leaderboard (endless mode) ----
+// ---- Leaderboards: endless scores, and stars from replayed level clears ----
 
 const scores = createClient({ baseUrl: scoresUrl() });
+const stars = new StarsStore();
+let lbUi: LeaderboardUi | null = null;
+let syncing = false;
+
+/** Cleared levels with no recorded flight on this device (cleared before recording existed). */
+const missingFlights = () => {
+  const have = stars.clears();
+  return LEVELS.filter((l) => progress.isCleared(l.id) && !have[l.id]).length;
+};
+
+/**
+ * Send every level whose best flight the server has not seen yet. Runs after each clear and at
+ * start-up, only once the player has joined the Adventure board.
+ */
+async function syncStars(): Promise<void> {
+  const player = stars.player();
+  if (!scores.enabled || !lbUi || !player.joined || syncing) return;
+  const queue = stars.pending();
+  lbUi.setStars({ joined: true, missing: missingFlights(), stars: player.stars, rank: player.rank });
+  if (!queue.length) return;
+  syncing = true;
+  lbUi.setStars({ phase: 'saving' });
+  let rejected = false;
+  for (const level of queue) {
+    const c = stars.clears()[level];
+    if (!c) continue;
+    const r = await scores.submitClear({ v: API_VERSION, key: player.key, name: loadName() || 'Player', level, bird: c.bird, segs: c.segs });
+    if (r.ok) {
+      stars.markSent(level);
+      const p = stars.updatePlayer({ id: r.data.player.id, stars: r.data.player.stars, rank: r.data.player.rank });
+      lbUi.setAdventure(r.data.board);
+      lbUi.setStars({ stars: p.stars, rank: p.rank });
+    } else if (r.error === 'rejected') {
+      // The replay did not hold up; it never will, so do not send it again.
+      stars.markSent(level);
+      rejected = true;
+    } else {
+      syncing = false;
+      lbUi.setStars({ phase: 'error', error: r.error });
+      return;
+    }
+  }
+  syncing = false;
+  lbUi.setStars({ phase: 'done', rejected });
+}
 /** Null when no scores API was configured at build time: the leaderboard UI then stays hidden. */
 const leaderboard: LeaderboardPort | null = scores.enabled
   ? {
@@ -264,13 +322,26 @@ const leaderboard: LeaderboardPort | null = scores.enabled
       boards: () => scores.fetchBoards(),
       lastName: () => loadName(),
       mine: () => myEntries(),
+      adventure: () => scores.fetchAdventure(),
+      myPlayerId: () => stars.player().id,
+      join: (name) => {
+        saveName(name);
+        stars.updatePlayer({ joined: true });
+        void syncStars();
+      },
     }
   : null;
 if (leaderboard) {
-  const lbUi = new LeaderboardUi(leaderboard, () => sfx.click());
+  const view = new LeaderboardUi(leaderboard, () => sfx.click());
+  lbUi = view;
+  const p = stars.player();
+  view.setStars({ joined: p.joined, stars: p.stars, rank: p.rank, missing: missingFlights() });
   ui.lbEnabled = true;
-  ui.endlessExtra = (into, d) => lbUi.renderSubmit(into, d);
-  ui.boardView = (into) => lbUi.renderBoard(into);
+  ui.endlessExtra = (into, d) => view.renderSubmit(into, d);
+  ui.boardView = (into, tab) => view.renderBoard(into, tab);
+  ui.resultsExtra = (into) => view.renderStars(into);
+  // Anything earned while offline goes up now.
+  void syncStars();
 }
 
 function setPaused(p: boolean): void {
@@ -447,4 +518,5 @@ window.__game = {
   },
   ticks: () => Math.round(run.body.t / STEP),
   leaderboard: { enabled: scores.enabled, url: scoresUrl() },
+  stars,
 };

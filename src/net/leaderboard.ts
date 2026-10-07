@@ -1,4 +1,4 @@
-import { LIMIT_DEFAULT, type Boards, type Entry, type SubmitRequest, type SubmitResponse } from '../../shared/scoreRules';
+import { LIMIT_DEFAULT, type AdventureBoard, type Boards, type ClearRequest, type ClearResponse, type Entry, type PlayerEntry, type SubmitRequest, type SubmitResponse } from '../../shared/scoreRules';
 
 /**
  * Leaderboard API client. Every call resolves to a Result and never throws, so the UI can
@@ -20,6 +20,8 @@ export interface LeaderboardClient {
   readonly enabled: boolean;
   fetchBoards(limit?: number): Promise<Result<Boards>>;
   submitScore(req: SubmitRequest): Promise<Result<SubmitResponse>>;
+  fetchAdventure(limit?: number): Promise<Result<AdventureBoard>>;
+  submitClear(req: ClearRequest): Promise<Result<ClearResponse>>;
 }
 
 /**
@@ -59,6 +61,31 @@ function isSubmitResponse(v: unknown): v is SubmitResponse {
   const r = v as Record<string, unknown>;
   const rank = r.rank as Record<string, unknown> | null | undefined;
   return r.ok === true && isEntry(r.entry) && typeof rank === 'object' && rank !== null && Number.isInteger(rank.all) && Number.isInteger(rank.week) && isBoards(r.boards);
+}
+
+function isPlayer(v: unknown): v is PlayerEntry {
+  if (typeof v !== 'object' || v === null) return false;
+  const e = v as Record<string, unknown>;
+  return Number.isInteger(e.id) && typeof e.name === 'string' && Number.isInteger(e.stars) && Number.isInteger(e.bird) && Number.isFinite(e.at);
+}
+
+function isAdventureBoard(v: unknown): v is AdventureBoard {
+  if (typeof v !== 'object' || v === null) return false;
+  const b = v as Record<string, unknown>;
+  return Number.isFinite(b.now) && Number.isFinite(b.total) && Array.isArray(b.top) && b.top.every(isPlayer);
+}
+
+function isClearResponse(v: unknown): v is ClearResponse {
+  if (typeof v !== 'object' || v === null) return false;
+  const r = v as Record<string, unknown>;
+  const level = r.level as Record<string, unknown> | null | undefined;
+  const player = r.player as Record<string, unknown> | null | undefined;
+  return (
+    r.ok === true &&
+    typeof level === 'object' && level !== null && typeof level.id === 'string' && Number.isInteger(level.stars) && typeof level.improved === 'boolean' &&
+    isPlayer(player) && Number.isInteger((player as Record<string, unknown>).rank) &&
+    isAdventureBoard(r.board)
+  );
 }
 
 export function createClient(opts: { baseUrl: string; fetch?: typeof fetch; timeoutMs?: number }): LeaderboardClient {
@@ -101,6 +128,9 @@ export function createClient(opts: { baseUrl: string; fetch?: typeof fetch; time
     fetchBoards: (limit = LIMIT_DEFAULT) => call(`/scores?limit=${limit}`, { method: 'GET' }, isBoards),
     submitScore: (req) =>
       call(`/scores`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(req) }, isSubmitResponse),
+    fetchAdventure: (limit = LIMIT_DEFAULT) => call(`/adventure?limit=${limit}`, { method: 'GET' }, isAdventureBoard),
+    submitClear: (req) =>
+      call(`/adventure`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(req) }, isClearResponse),
   };
 }
 

@@ -2,7 +2,7 @@
 
 A flap-through-the-pipes game in 8-bit platformer clothes. Tap to flap, pick a bird, and fly
 through eight short levels in four worlds to the castle at the end of each one. There is also
-an endless mode with a global leaderboard.
+an endless mode. Both have a global leaderboard.
 
 **Play:** https://arcade.hz.ax/flap-flock/
 
@@ -82,9 +82,17 @@ Pushes to `main` deploy through GitHub Actions to GitHub Pages.
 
 ## Leaderboard
 
-The leaderboard is for endless mode only; the score is the number of pipes passed. Scores
-live in a small Cloudflare Worker (`worker/`) backed by one SQLite Durable Object, which runs
-comfortably on the free tier. The game itself stays a static site.
+There are two boards:
+
+- **Adventure.** It ranks players by total stars over the 8 levels (24 at most). On equal
+  stars, whoever reached that total first ranks higher. After a clear you can join with a
+  name, once. From then on, every new best clear is added automatically. Each level counts
+  its best clear.
+- **Endless.** It ranks by pipes passed, all-time and this week, with an optional name at
+  game over.
+
+Both live in a small Cloudflare Worker (`worker/`) backed by one SQLite Durable Object,
+which runs comfortably on the free tier. The game itself stays a static site.
 
 **Setup.** Add two repository secrets, then re-run the workflow. Until they exist the Worker
 job is skipped and the game is published without any leaderboard UI.
@@ -101,16 +109,33 @@ repository variable `SCORES_URL`; it is used when the Worker job reports no addr
 
 **What is stored.**
 - The name as entered, cleaned of invisible characters and cut to at most 16 characters.
-- The score, the bird, and the time of submission.
-- Seconds flown and number of flaps.
+- **Endless:** the score, the bird, the time of submission, seconds flown and number of flaps.
+- **Adventure:** for each level, the best stars and coins with the bird used, and the star
+  total. Each joined device keeps a random secret key; the server stores only a SHA-256 hash
+  of it, which lets later clears update the same row. The button presses of a clear are
+  checked and then discarded, not stored.
 
-Nothing identifies a player: no account, no cookie, no device id. For rate limiting, the
+There is no account and no cookie. For rate limiting, the
 Worker keeps a salted, truncated hash of the sender's network address for at most a day. The
 salt changes daily, and the address itself is never stored. The browser remembers the last
 name used and which rows it submitted, to prefill the field and highlight your rows.
 
-**Fair play.** The endless course scrolls at a known speed, so the server knows exactly how
-long a given number of pipes takes for each bird. It rejects:
+**Fair play, Adventure.** A clear is sent as its button presses, not as a result. The Worker
+flies those presses with the game's own simulation (`src/game/replay.ts`) and stores only
+what the replay achieves. Forged or edited flights don't reach the flag and are refused.
+
+The simulation is deterministic, so the replay matches the player's browser bit for bit:
+- a fixed time step;
+- seeded levels;
+- its own sine (`src/game/dmath.ts`), because `Math.sin` differs slightly between browsers.
+
+A replay of the longest level takes about 4 ms of CPU.
+
+What it cannot rule out is a bot that really flies: the game's own planner can earn every
+star.
+
+**Fair play, Endless.** The endless course scrolls at a known speed, so the server knows
+exactly how long a given number of pipes takes for each bird. It rejects:
 - a score flown in the wrong time;
 - more flaps than the cooldown allows;
 - duplicate submissions of the same run;
@@ -130,9 +155,15 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" https://<worker-address>/scores
 
 Without that secret the route does not exist.
 
-**Retention.** The site keeps the all-time top 1000, plus the top 5000 of the current week
-and of the previous week. Everything else is pruned daily. Weeks start on Monday 00:00 UTC.
+**Retention.** Endless keeps the all-time top 1000, plus the top 5000 of the current week and
+of the previous week; Adventure keeps the top 3000 players. Everything else is pruned daily.
+Weeks start on Monday 00:00 UTC.
 
 **Changing the rules.** The endless ramp (speed, gap, spacing) lives in
 `shared/scoreRules.ts` and both the game and the Worker use it. Changing it changes which
 scores are plausible; `npm test` checks that honest runs still pass.
+
+Changing the physics or the levels has a bigger effect. Clears recorded before the change
+no longer replay, so stored Adventure stars stay but older flights can't be re-sent.
+`scripts/fixtures/clears.json` holds sample flights for the end-to-end tests. Regenerate it
+with `UPDATE_FIXTURES=1 npx vitest run test/fixtures.test.ts`.

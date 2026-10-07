@@ -1,4 +1,4 @@
-import { NAME_MAX, resetsIn, sanitizeName, type Boards, type Entry, type SubmitResponse } from '../../shared/scoreRules';
+import { NAME_MAX, STARS_MAX, resetsIn, sanitizeName, type AdventureBoard, type Boards, type Entry, type PlayerEntry, type SubmitResponse } from '../../shared/scoreRules';
 import { BIRD_ORDER } from '../game/birds';
 import { t } from '../i18n';
 import type { FailureKind, Result } from '../net/leaderboard';
@@ -13,6 +13,24 @@ export interface LeaderboardPort {
   lastName(): string;
   /** Ids of rows submitted from this device. */
   mine(): Set<number>;
+  adventure(): Promise<Result<AdventureBoard>>;
+  /** This device's row on the Adventure board, once it has one. */
+  myPlayerId(): number | null;
+  /** Join the Adventure board under this name (results panel). */
+  join(name: string): void;
+}
+
+/** What the results panel shows about the Adventure board. */
+export interface StarsView {
+  joined: boolean;
+  phase: 'idle' | 'saving' | 'done' | 'error';
+  error?: FailureKind;
+  /** The last clear did not survive the server's replay. */
+  rejected: boolean;
+  stars: number;
+  rank: number;
+  /** Levels cleared on this device with no recorded flight to send. */
+  missing: number;
 }
 
 interface SubmitState {
@@ -23,7 +41,8 @@ interface SubmitState {
   result?: SubmitResponse;
 }
 
-type Tab = 'all' | 'week';
+type Period = 'all' | 'week';
+export type BoardTab = 'adventure' | 'endless';
 
 /** A board fetched this recently is shown as-is instead of being requested again. */
 const BOARD_FRESH_MS = 30_000;
@@ -38,12 +57,18 @@ export class LeaderboardUi {
   private submit: SubmitState = { gameId: '', phase: 'idle', name: '' };
   private submitInto: HTMLElement | null = null;
   private over: EndlessData | null = null;
-  private tab: Tab = 'all';
+  private tab: BoardTab = 'adventure';
+  private period: Period = 'all';
   private boardPhase: 'loading' | 'ready' | 'error' = 'loading';
   private data: Boards | null = null;
   private fetchedAt = 0;
+  private adv: AdventureBoard | null = null;
+  private advFetchedAt = 0;
   private request = 0;
   private boardInto: HTMLElement | null = null;
+  private stars: StarsView = { joined: false, phase: 'idle', rejected: false, stars: 0, rank: 0, missing: 0 };
+  private starsInto: HTMLElement | null = null;
+  private starsName = '';
 
   constructor(
     private port: LeaderboardPort,
@@ -227,11 +252,118 @@ export class LeaderboardUi {
     return list;
   }
 
+  // ---- Results panel: the Adventure board ----
+
+  /** Fresh board data that came with a submission. */
+  setAdventure(board: AdventureBoard): void {
+    this.adv = board;
+    this.advFetchedAt = Date.now();
+  }
+
+  setStars(view: Partial<StarsView>): void {
+    this.stars = { ...this.stars, ...view };
+    if (this.starsInto?.isConnected) this.starsInto.replaceChildren(this.starsBlock());
+  }
+
+  renderStars(into: HTMLElement): void {
+    this.starsInto = into;
+    if (!this.starsName) this.starsName = this.port.lastName();
+    into.replaceChildren(this.starsBlock());
+  }
+
+  private starsBlock(): HTMLElement {
+    const v = this.stars;
+    const box = make('div', 'submit-box stars-box');
+    box.id = 'starsBox';
+    box.dataset.phase = v.joined ? v.phase : 'join';
+    const status = make('p', 'submit-status', '');
+    status.id = 'starsStatus';
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    if (v.joined) {
+      if (v.phase === 'saving') status.textContent = t('stars.saving');
+      else if (v.phase === 'error') {
+        status.className = 'submit-status bad';
+        status.textContent = v.error === 'rate' ? t('submit.errRate') : v.error === 'server' ? t('submit.errServer') : t('submit.errNetwork');
+      } else if (v.rejected) {
+        status.className = 'submit-status bad';
+        status.textContent = t('stars.rejected');
+      } else if (v.rank > 0) {
+        status.className = 'submit-status ok';
+        status.textContent = t('stars.saved', { stars: v.stars, rank: v.rank });
+      }
+      box.appendChild(status);
+      if (v.missing > 0) box.appendChild(make('p', 'hint', t('stars.older')));
+      return box;
+    }
+
+    const form = make('form', 'submit-form');
+    form.noValidate = true;
+    const label = make('label', 'submit-label', t('stars.label'));
+    label.htmlFor = 'starsName';
+    const input = make('input', 'name-input');
+    input.id = 'starsName';
+    input.type = 'text';
+    input.value = this.starsName;
+    input.placeholder = t('submit.placeholder');
+    input.maxLength = NAME_MAX * 3;
+    input.setAttribute('autocomplete', 'nickname');
+    input.autocapitalize = 'words';
+    input.spellcheck = false;
+    input.enterKeyHint = 'send';
+    const send = make('button', 'btn btn-go submit-btn', t('stars.join'));
+    send.type = 'submit';
+    send.id = 'starsJoin';
+    send.disabled = !sanitizeName(this.starsName);
+    let composing = false;
+    let composedAt = -1e9;
+    const commit = () => {
+      const points = Array.from(input.value);
+      if (points.length > NAME_MAX) input.value = points.slice(0, NAME_MAX).join('');
+      this.starsName = input.value;
+      send.disabled = !sanitizeName(input.value);
+    };
+    input.addEventListener('compositionstart', () => (composing = true));
+    input.addEventListener('compositionend', () => {
+      composing = false;
+      composedAt = performance.now();
+      commit();
+    });
+    input.addEventListener('input', () => {
+      if (composing) this.starsName = input.value;
+      else commit();
+    });
+    input.addEventListener('focus', () => window.setTimeout(() => input.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300));
+    form.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      if (composing || performance.now() - composedAt < 80) return;
+      commit();
+      const name = sanitizeName(this.starsName);
+      if (!name) return;
+      this.click();
+      this.port.join(name);
+    });
+    const fields = make('div', 'submit-fields');
+    fields.append(input, send);
+    form.append(label, fields, make('p', 'hint', t('stars.hint')));
+    box.appendChild(form);
+    return box;
+  }
+
   // ---- Board screen ----
 
-  renderBoard(into: HTMLElement): void {
+  renderBoard(into: HTMLElement, tab?: BoardTab): void {
     this.boardInto = into;
-    if (this.data && Date.now() - this.fetchedAt < BOARD_FRESH_MS) {
+    if (tab) this.tab = tab;
+    this.show();
+  }
+
+  private fresh(): boolean {
+    return this.tab === 'adventure' ? !!this.adv && Date.now() - this.advFetchedAt < BOARD_FRESH_MS : !!this.data && Date.now() - this.fetchedAt < BOARD_FRESH_MS;
+  }
+
+  private show(): void {
+    if (this.fresh()) {
       this.boardPhase = 'ready';
       this.drawBoard();
     } else void this.load();
@@ -239,16 +371,60 @@ export class LeaderboardUi {
 
   private async load(): Promise<void> {
     const request = ++this.request;
+    const tab = this.tab;
     this.boardPhase = 'loading';
     this.drawBoard();
-    const r = await this.port.boards();
-    if (request !== this.request) return;
-    if (r.ok) {
-      this.data = r.data;
-      this.fetchedAt = Date.now();
-      this.boardPhase = 'ready';
-    } else this.boardPhase = 'error';
+    if (tab === 'adventure') {
+      const r = await this.port.adventure();
+      if (request !== this.request) return;
+      if (r.ok) this.setAdventure(r.data);
+      this.boardPhase = r.ok ? 'ready' : 'error';
+    } else {
+      const r = await this.port.boards();
+      if (request !== this.request) return;
+      if (r.ok) {
+        this.data = r.data;
+        this.fetchedAt = Date.now();
+      }
+      this.boardPhase = r.ok ? 'ready' : 'error';
+    }
     this.drawBoard();
+  }
+
+  private playerRow(rank: number, e: PlayerEntry, me: boolean): HTMLLIElement {
+    const li = make('li', 'lb-row' + (me ? ' me' : ''));
+    if (me) li.setAttribute('aria-current', 'true');
+    li.dataset.id = String(e.id);
+    li.appendChild(make('span', 'lb-rank', String(rank)));
+    const bird = BIRD_ORDER[e.bird];
+    const icon = make('span', 'lb-bird');
+    if (bird) icon.appendChild(birdCanvas(bird, 1));
+    li.appendChild(icon);
+    const name = make('span', 'lb-name');
+    name.appendChild(make('span', 'lb-name-text', e.name));
+    if (me) name.appendChild(make('span', 'lb-you', t('lb.you')));
+    li.appendChild(name);
+    const score = make('span', 'lb-score lb-stars', `${e.stars}★`);
+    score.title = `${e.stars}/${STARS_MAX}`;
+    li.appendChild(score);
+    return li;
+  }
+
+  private tabs(items: ReadonlyArray<readonly [string, string, string]>, current: string, pick: (v: string) => void): HTMLElement {
+    const row = make('div', 'menu row lb-tabs');
+    row.setAttribute('role', 'tablist');
+    for (const [value, key, id] of items) {
+      const b = button('btn btn-small' + (current === value ? ' active' : ''), t(key as Parameters<typeof t>[0]), () => {
+        if (current === value) return;
+        this.click();
+        pick(value);
+      });
+      b.id = id;
+      b.setAttribute('role', 'tab');
+      b.setAttribute('aria-selected', String(current === value));
+      row.appendChild(b);
+    }
+    return row;
   }
 
   private drawBoard(): void {
@@ -256,31 +432,54 @@ export class LeaderboardUi {
     if (!into?.isConnected) return;
     const p = make('div', 'board-body');
     p.id = 'boardPanel';
-    p.appendChild(make('p', 'small', t('lb.subtitle')));
-    const tabs = make('div', 'menu row lb-tabs');
-    tabs.setAttribute('role', 'tablist');
-    for (const [tab, key] of [['all', 'lb.tabAll'], ['week', 'lb.tabWeek']] as const) {
-      const b = button('btn btn-small' + (this.tab === tab ? ' active' : ''), t(key), () => {
-        if (this.tab === tab) return;
-        this.click();
-        this.tab = tab;
-        this.drawBoard();
-      });
-      b.id = tab === 'all' ? 'tabAll' : 'tabWeek';
-      b.setAttribute('role', 'tab');
-      b.setAttribute('aria-selected', String(this.tab === tab));
-      tabs.appendChild(b);
+    p.dataset.tab = this.tab;
+    p.appendChild(
+      this.tabs(
+        [
+          ['adventure', 'lb.tabAdventure', 'tabAdventure'],
+          ['endless', 'lb.tabEndless', 'tabEndless'],
+        ],
+        this.tab,
+        (v) => {
+          this.tab = v as BoardTab;
+          this.show();
+        },
+      ),
+    );
+    p.appendChild(make('p', 'small', t(this.tab === 'adventure' ? 'lb.subtitleAdventure' : 'lb.subtitle')));
+    if (this.tab === 'endless') {
+      p.appendChild(
+        this.tabs(
+          [
+            ['all', 'lb.tabAll', 'tabAll'],
+            ['week', 'lb.tabWeek', 'tabWeek'],
+          ],
+          this.period,
+          (v) => {
+            this.period = v as Period;
+            this.drawBoard();
+          },
+        ),
+      );
     }
-    p.appendChild(tabs);
     const body = make('div', 'lb-body');
     body.setAttribute('role', 'tabpanel');
     body.setAttribute('aria-live', 'polite');
+    const ready = this.tab === 'adventure' ? this.adv : this.data;
     if (this.boardPhase === 'loading') body.appendChild(make('p', 'small lb-note', t('lb.loading')));
-    else if (this.boardPhase === 'error' || !this.data) {
+    else if (this.boardPhase === 'error' || !ready) {
       body.appendChild(make('p', 'lb-note bad', t('lb.error')));
       body.appendChild(button('btn', t('lb.retry'), () => void this.load(), 'lbRetry'));
-    } else {
-      const board = this.tab === 'all' ? this.data.all : this.data.week;
+    } else if (this.tab === 'adventure' && this.adv) {
+      if (this.adv.top.length === 0) body.appendChild(make('p', 'small lb-note', t('lb.empty')));
+      else {
+        const me = this.port.myPlayerId();
+        const list = make('ol', 'lb-list');
+        this.adv.top.forEach((e, i) => list.appendChild(this.playerRow(i + 1, e, e.id === me)));
+        body.appendChild(list);
+      }
+    } else if (this.data) {
+      const board = this.period === 'all' ? this.data.all : this.data.week;
       if (board.top.length === 0) body.appendChild(make('p', 'small lb-note', t('lb.empty')));
       else {
         const mine = this.port.mine();
@@ -288,7 +487,7 @@ export class LeaderboardUi {
         board.top.forEach((e, i) => list.appendChild(this.row(i + 1, e, mine.has(e.id))));
         body.appendChild(list);
       }
-      if (this.tab === 'week') {
+      if (this.period === 'week') {
         const serverNow = this.data.now + (Date.now() - this.fetchedAt);
         body.appendChild(make('p', 'small lb-resets', t('lb.resets', resetsIn(serverNow, this.data.weekEnd))));
       }

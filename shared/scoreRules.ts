@@ -206,6 +206,53 @@ export function checkPlausible(r: Pick<SubmitRequest, 'score' | 'secs' | 'flaps'
   return null;
 }
 
+// ---- Adventure board: total stars from replay-verified level clears ----
+
+/** Eight levels, three stars each (test/scoreRules.test.ts checks it against the levels). */
+export const STARS_MAX = 24;
+/** A clear carries its inputs, so it is much bigger than an endless score. */
+export const CLEAR_BODY_MAX_BYTES = 32 * 1024;
+
+/** Inputs of one attempt, delta-encoded tick numbers (see src/game/replay.ts). */
+export interface InputSegment {
+  p: number[];
+  h: number[];
+}
+
+export interface ClearRequest {
+  v: number;
+  /** Random secret kept on the device; the server stores only its hash. */
+  key: string;
+  name: string;
+  level: string;
+  /** Index into BIRD_IDS. */
+  bird: number;
+  segs: InputSegment[];
+}
+
+export interface PlayerEntry {
+  id: number;
+  name: string;
+  stars: number;
+  /** Bird of the clear that last raised the total. */
+  bird: number;
+  /** When the current total was first reached; earlier ranks higher on equal stars. */
+  at: number;
+}
+
+export interface AdventureBoard {
+  now: number;
+  total: number;
+  top: PlayerEntry[];
+}
+
+export interface ClearResponse {
+  ok: true;
+  level: { id: string; stars: number; coins: number; improved: boolean };
+  player: PlayerEntry & { rank: number };
+  board: AdventureBoard;
+}
+
 export function clampLimit(raw: string | null): number {
   const n = raw === null ? LIMIT_DEFAULT : Number.parseInt(raw, 10);
   if (!Number.isFinite(n)) return LIMIT_DEFAULT;

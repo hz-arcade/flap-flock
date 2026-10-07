@@ -75,14 +75,26 @@ async function open(viewport, opts = {}) {
   const posts = [];
   const gets = [];
   page.on('pageerror', (e) => errors.push(String(e)));
+  const clears = [];
   page.on('request', (r) => {
     if (!r.url().startsWith(API)) return;
-    if (r.method() === 'POST') posts.push(r.postDataJSON());
+    if (r.method() === 'POST' && r.url().includes('/adventure')) clears.push(r.postDataJSON());
+    else if (r.method() === 'POST') posts.push(r.postDataJSON());
     if (r.method() === 'GET') gets.push(r.url());
   });
   await page.goto(SITE + (opts.query ?? ''), { waitUntil: 'load' });
   await page.waitForFunction(() => !!window.__game);
-  return { ctx, page, errors, posts, gets };
+  return { ctx, page, errors, posts, gets, clears };
+}
+
+/** Let the planner fly the level that is waiting to start, through to the results panel. */
+async function clearLevel(page) {
+  await page.waitForFunction(() => window.__game.state().phase === 'ready');
+  await page.evaluate(() => {
+    window.__game.autopilot(true);
+    window.__game.step(60);
+  });
+  await page.waitForSelector('#starsBox', { timeout: 15000 });
 }
 
 const state = (page) => page.evaluate(() => window.__game.state());
@@ -116,9 +128,12 @@ try {
     check('feature is on in this build', await page.evaluate(() => window.__game.leaderboard.enabled));
 
     await page.click('#lbBtn');
-    await page.waitForSelector('#boardPanel .lb-note');
+    await page.waitForSelector('#boardPanel[data-tab="adventure"] .lb-note');
     await page.waitForFunction(() => document.querySelector('#boardPanel .lb-note')?.textContent?.includes('No scores yet'));
-    check('empty board says so', true);
+    check('board opens on the empty Adventure tab', /8 levels/.test((await page.locator('#boardPanel').textContent()) ?? ''));
+    await page.click('#tabEndless');
+    await page.waitForFunction(() => document.querySelector('#boardPanel[data-tab="endless"] .lb-note')?.textContent?.includes('No scores yet'));
+    check('empty endless board says so', true);
     await page.click('#tabWeek');
     check('weekly tab shows the reset countdown', /Resets in \d+d \d+h/.test((await page.locator('.lb-resets').textContent()) ?? ''));
     check('weekly tab is marked selected', (await page.locator('#tabWeek').getAttribute('aria-selected')) === 'true');
@@ -257,8 +272,11 @@ try {
     check('board load failure offers Retry', ((await page.locator('#boardPanel .lb-note').textContent()) ?? '').includes('Couldn’t load'));
     mode = 'pass';
     await page.click('#lbRetry');
+    await page.waitForFunction(() => !document.querySelector('#lbRetry'));
+    check('Retry loads the board', (await page.locator('#boardPanel .lb-note.bad').count()) === 0);
+    await page.click('#tabEndless');
     await page.waitForSelector('#boardPanel .lb-row');
-    check('Retry loads the board', (await page.locator('#boardPanel .lb-row').count()) >= 2);
+    check('the endless tab has the earlier runs', (await page.locator('#boardPanel .lb-row').count()) >= 2);
     check('rows from another browser are not marked as mine', (await page.locator('#boardPanel .lb-row.me').count()) === 0);
     await page.click('#backBtn');
 
@@ -322,6 +340,57 @@ try {
   }
 
   /* ------------------------------------------------------------------ */
+  console.log('adventure: join after a clear, automatic updates, the stars board');
+  {
+    const { ctx, page, errors, clears } = await open({ width: 1280, height: 800 }, { query: '?lang=en' });
+    await page.click('#playBtn');
+    await clearLevel(page);
+    check('results offer to join the stars board', (await page.locator('#starsBox[data-phase="join"] #starsName').count()) === 1);
+    check('nothing is sent before joining', clears.length === 0);
+    await page.fill('#starsName', 'Ann');
+    await page.screenshot({ path: `${OUT}/flock-stars-join.png` });
+    await page.click('#starsJoin');
+    await page.waitForSelector('#starsBox[data-phase="done"]', { timeout: 15000 });
+    let status = (await page.locator('#starsStatus').textContent()) ?? '';
+    check('joining sends the 1-1 flight and shows the rank', clears.length === 1 && clears[0].level === '1-1' && clears[0].segs.length === 1 && /Leaderboard: 3★ · #1/.test(status), status);
+    check('the flight carries no score of its own, only inputs', !('stars' in clears[0]) && !('coins' in clears[0]) && Array.isArray(clears[0].segs[0].p));
+    await page.screenshot({ path: `${OUT}/flock-stars-done.png` });
+
+    await page.click('#nextBtn');
+    await clearLevel(page);
+    await page.waitForSelector('#starsBox[data-phase="done"]', { timeout: 15000 });
+    status = (await page.locator('#starsStatus').textContent()) ?? '';
+    check('the next clear is added automatically', clears.length === 2 && clears[1].level === '1-2' && /6★ · #1/.test(status), status);
+    check('the same key both times', clears[0].key === clears[1].key);
+
+    // A tampered flight: the server replays it, it does not reach the flag, nothing is stored.
+    await page.route(`${API}/adventure`, async (route) => {
+      if (route.request().method() !== 'POST') return route.continue();
+      const body = route.request().postDataJSON();
+      body.segs[0].p = body.segs[0].p.slice(0, 12);
+      await route.continue({ postData: JSON.stringify(body) });
+    });
+    await page.click('#nextBtn');
+    await clearLevel(page);
+    await page.waitForSelector('#starsBox[data-phase="done"]', { timeout: 15000 });
+    check('a flight that does not hold up is refused and the panel says so', /could not be checked/.test((await page.locator('#starsStatus').textContent()) ?? ''));
+    await page.unroute(`${API}/adventure`);
+    const adv = await (await fetch(`${API}/adventure`)).json();
+    check('the board still has 6 stars for Ann', adv.top[0]?.name === 'Ann' && adv.top[0].stars === 6, JSON.stringify(adv.top));
+
+    await page.click('#mapBtn');
+    await page.click('#mapBoardBtn');
+    await page.waitForSelector('#boardPanel[data-tab="adventure"] .lb-row.me');
+    check('the stars board highlights my row', ((await page.locator('#boardPanel .lb-row.me .lb-stars').textContent()) ?? '') === '6★');
+    await page.screenshot({ path: `${OUT}/flock-stars-board.png` });
+    await page.click('#backBtn');
+    await page.waitForSelector('.screen-map');
+    check('Back returns to the map', true);
+    check('no page errors', errors.length === 0, errors.join(' | '));
+    await ctx.close();
+  }
+
+  /* ------------------------------------------------------------------ */
   console.log('hostile names are shown as text');
   {
     const r = await fetch(`${API}/scores`, {
@@ -337,6 +406,7 @@ try {
       void d.dismiss();
     });
     await page.click('#lbBtn');
+    await page.click('#tabEndless');
     await page.waitForSelector('#boardPanel .lb-row');
     await wait(300);
     const first = (await page.locator('#boardPanel .lb-row .lb-name-text').first().textContent()) ?? '';

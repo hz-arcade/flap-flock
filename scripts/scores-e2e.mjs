@@ -4,7 +4,7 @@
  *   npm run scores:e2e
  */
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -61,12 +61,19 @@ const RUNS = { 10: 28, 20: 50, 30: 69, 50: 101 };
 const run = (score) => ({ score, secs: RUNS[score], flaps: RUNS[score] * 2 });
 const sub = (over = {}) => ({ v: 1, gid: randomUUID(), name: 'Sam', ...run(20), bird: 0, ...over });
 
-async function post(base, body, origin = LOCAL, raw = false) {
+async function post(base, body, origin = LOCAL, raw = false, route = '/scores') {
   const headers = { 'content-type': 'application/json' };
   if (origin) headers.origin = origin;
-  const r = await fetch(`${base}/scores`, { method: 'POST', headers, body: raw ? body : JSON.stringify(body) });
+  const r = await fetch(`${base}${route}`, { method: 'POST', headers, body: raw ? body : JSON.stringify(body) });
   return { status: r.status, headers: r.headers, json: await r.json().catch(() => null) };
 }
+
+/** Recorded level clears (test/fixtures.test.ts keeps them in step with the game). */
+const CLEARS = JSON.parse(readFileSync(new URL('./fixtures/clears.json', import.meta.url), 'utf8'));
+const clear = (name, over = {}) => ({ v: 1, key: KEY_A, name: 'Ann', level: CLEARS[name].level, bird: CLEARS[name].bird, segs: CLEARS[name].segs, ...over });
+const KEY_A = randomUUID();
+const KEY_B = randomUUID();
+const postClear = (base, body, origin = LOCAL) => post(base, body, origin, false, '/adventure');
 
 async function main() {
   console.log('worker with localhost allowed and an admin token');
@@ -151,6 +158,48 @@ async function main() {
     b = await (await fetch(`${base}/scores`)).json();
     check('removed row is gone from the board', b.all.total === 2 && !b.all.top.some((e) => e.id === tieId));
 
+    // Adventure: clears are replayed, the best per level counts, players rank by total stars.
+    let a = await (await fetch(`${base}/adventure`)).json();
+    check('adventure board starts empty', a.total === 0 && a.top.length === 0, JSON.stringify(a));
+    p = await postClear(base, clear('1-1-low'));
+    check('a replayed clear is accepted', p.status === 200 && p.json?.ok === true && p.json.level.stars === CLEARS['1-1-low'].stars && p.json.level.coins === CLEARS['1-1-low'].coins, JSON.stringify(p.json));
+    check('the player appears with those stars at rank 1', p.json?.player?.stars === CLEARS['1-1-low'].stars && p.json.player.rank === 1 && p.json.board.top[0]?.name === 'Ann');
+    check('the device key is not exposed', !JSON.stringify(p.json).includes(KEY_A) && JSON.stringify(Object.keys(p.json.player).sort()) === '["at","bird","id","name","rank","stars"]');
+    const annId = p.json.player.id;
+    p = await postClear(base, clear('1-1'));
+    check('a better clear of the same level replaces it', p.status === 200 && p.json.level.improved === true && p.json.player.stars === 3, JSON.stringify(p.json?.level));
+    p = await postClear(base, clear('1-1-low'));
+    check('a worse clear changes nothing', p.status === 200 && p.json.level.improved === false && p.json.player.stars === 3 && p.json.level.stars === 3);
+    p = await postClear(base, clear('1-2'));
+    check('stars add up across levels', p.json?.player?.stars === 6, JSON.stringify(p.json?.player));
+    p = await postClear(base, clear('3-1-flag'));
+    check('a clear with a restart at the halfway flag is replayed too', p.status === 200 && p.json.player.stars === 9, JSON.stringify(p.json));
+    const forged = clear('1-2', { segs: [{ p: CLEARS['1-2'].segs[0].p.slice(0, -10), h: [] }] });
+    p = await postClear(base, forged);
+    check('inputs that do not clear the level are refused', p.status === 422 && p.json?.error === 'implausible', JSON.stringify(p.json));
+    p = await postClear(base, clear('1-2', { level: '4-2' }));
+    check('inputs from another level are refused', p.status === 422);
+    p = await postClear(base, clear('1-1', { key: 'nope' }));
+    check('a malformed key is rejected', p.status === 400 && p.json?.field === 'key');
+    p = await postClear(base, clear('1-1', { segs: [{ p: [1, -4], h: [] }] }));
+    check('malformed inputs are rejected', p.status === 400 && p.json?.field === 'segs');
+    p = await post(base, JSON.stringify({ ...clear('1-1'), pad: 'x'.repeat(40000) }), LOCAL, true, '/adventure');
+    check('oversized clear is rejected', p.status === 413);
+    p = await postClear(base, clear('1-1'), null);
+    check('clear without Origin is refused', p.status === 403);
+
+    p = await postClear(base, clear('1-1', { key: KEY_B, name: 'Bo' }));
+    check('a second player with fewer stars ranks below', p.json?.player?.rank === 2, JSON.stringify(p.json?.player));
+    await postClear(base, clear('1-2', { key: KEY_B, name: 'Bo' }));
+    p = await postClear(base, clear('3-1-flag', { key: KEY_B, name: 'Bo' }));
+    check('equal stars: whoever got there first stays ahead', p.json?.player?.stars === 9 && p.json.player.rank === 2 && p.json.board.top[0].id === annId, JSON.stringify(p.json?.board?.top));
+    p = await postClear(base, clear('1-1', { name: 'Ann B' }));
+    check('a later submission renames the player', p.json?.player?.name === 'Ann B' && p.json.player.id === annId);
+    a = await (await fetch(`${base}/adventure?limit=1`, { headers: { origin: LOCAL } })).json();
+    check('adventure board trims to the limit but counts everyone', a.top.length === 1 && a.total === 2 && a.top[0].stars === 9);
+    r = await fetch(`${base}/adventure`, { headers: { origin: FOREIGN } });
+    check('adventure GET from a foreign origin is refused', r.status === 403);
+
     // Rate limit: 10 stored submissions per window. Three are stored so far.
     let last;
     for (let i = 0; i < 7; i++) last = await post(base, sub({ name: `P${i}`, ...run(10) }));
@@ -176,6 +225,10 @@ async function main() {
     check('the live site origin is accepted', p.status === 200 && p.json?.ok === true, JSON.stringify(p.json));
     p = await post(base, sub(), 'https://arcade.hz.ax.evil.example');
     check('a look-alike origin is refused', p.status === 403);
+    p = await postClear(base, clear('1-1'), LOCAL);
+    check('clears from localhost are refused in production settings', p.status === 403);
+    p = await postClear(base, clear('1-1'), 'https://arcade.hz.ax');
+    check('clears from the live site are accepted', p.status === 200 && p.json?.player?.stars === 3, JSON.stringify(p.json));
     const r = await fetch(`${base}/scores/1`, { method: 'DELETE', headers: { authorization: 'Bearer undefined' } });
     check('delete route does not exist without a configured token', r.status === 404, String(r.status));
     const b = await (await fetch(`${base}/scores`)).json();

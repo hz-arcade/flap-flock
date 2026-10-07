@@ -1,5 +1,6 @@
 import { circleCircle, circleRect } from './collide';
 import { GROUND_Y } from './constants';
+import { dcos, dsin } from './dmath';
 
 /**
  * Hazards are pure functions of the run clock t, so a run is fully determined by its inputs
@@ -25,12 +26,12 @@ export const WHEEL_BALL_R = 3.5;
 const TAU = Math.PI * 2;
 
 export function urchinY(h: Extract<Hazard, { kind: 'urchin' }>, t: number): number {
-  return h.y + h.amp * Math.sin((TAU * t) / h.period + h.phase);
+  return h.y + h.amp * dsin((TAU * t) / h.period + h.phase);
 }
 
 /** Centre y of a lava fireball; below the floor (hidden) for half of each period. */
 export function lavaY(h: Extract<Hazard, { kind: 'lava' }>, t: number): number {
-  const s = Math.sin((TAU * t) / h.period + h.phase);
+  const s = dsin((TAU * t) / h.period + h.phase);
   const rest = GROUND_Y + h.r + 2;
   return s > 0 ? rest - (rest - h.top) * s : rest;
 }
@@ -59,7 +60,7 @@ export function wheelBalls(h: Extract<Hazard, { kind: 'wheel' }>, t: number): Ar
   const out: Array<[number, number]> = [];
   for (let k = 0; k < h.balls; k++) {
     const d = (h.arm * k) / (h.balls - 1);
-    out.push([h.x + Math.cos(a) * d, h.y + Math.sin(a) * d]);
+    out.push([h.x + dcos(a) * d, h.y + dsin(a) * d]);
   }
   return out;
 }

@@ -11,7 +11,7 @@ export interface UiActions {
   continueLevel(): void;
   endless(): void;
   birds(): void;
-  board(): void;
+  board(from: 'title' | 'map' | 'over'): void;
   map(): void;
   title(): void;
   play(level: LevelDef): void;
@@ -75,7 +75,9 @@ export class Ui {
   /** Slot where the endless game-over panel puts the leaderboard form (filled by main). */
   endlessExtra: ((into: HTMLElement, data: EndlessData) => void) | null = null;
   /** Fills the leaderboard screen (set by main when the leaderboard is enabled). */
-  boardView: ((into: HTMLElement) => void) | null = null;
+  boardView: ((into: HTMLElement, tab: 'adventure' | 'endless') => void) | null = null;
+  /** Slot on the results panel for the Adventure board (filled by main). */
+  resultsExtra: ((into: HTMLElement) => void) | null = null;
   lbEnabled = false;
 
   constructor(
@@ -158,7 +160,7 @@ export class Ui {
       menu.appendChild(this.btn(started ? t('map.title') : t('title.adventure'), () => this.actions.adventure(), started && !this.progress.allCleared ? 'btn' : 'btn btn-go', started ? 'mapMenuBtn' : 'playBtn'));
       menu.appendChild(this.btn(t('title.endless'), () => this.actions.endless(), 'btn', 'endlessBtn'));
       menu.appendChild(this.btn(t('title.birds'), () => this.actions.birds(), 'btn', 'birdsBtn'));
-      if (this.lbEnabled) menu.appendChild(this.btn(t('title.board'), () => this.actions.board(), 'btn', 'lbBtn'));
+      if (this.lbEnabled) menu.appendChild(this.btn(t('title.board'), () => this.actions.board('title'), 'btn', 'lbBtn'));
       box.appendChild(menu);
       if (started) box.appendChild(make('p', 'small', `★ ${t('title.stars', { n: this.progress.totalStars, total: LEVELS.length * 3 })}`));
       box.appendChild(make('p', 'small keys', t('title.keys')));
@@ -279,6 +281,10 @@ export class Ui {
         this.actions.endless();
       });
       panel.appendChild(endless);
+      if (this.lbEnabled) {
+        const lb = this.btn(t('title.board'), () => this.actions.board('map'), 'btn btn-small map-board', 'mapBoardBtn');
+        panel.appendChild(lb);
+      }
       root.appendChild(panel);
     });
   }
@@ -357,6 +363,11 @@ export class Ui {
         panel.appendChild(card);
       }
       if (d.allCleared && !d.hasNext) panel.appendChild(make('p', 'small', t('clear.allDone')));
+      if (this.resultsExtra) {
+        const extra = make('div', 'extra');
+        panel.appendChild(extra);
+        this.resultsExtra(extra);
+      }
       const menu = make('div', 'menu');
       if (d.hasNext) menu.appendChild(this.btn(t('clear.next'), () => this.actions.next(), 'btn btn-go', 'nextBtn'));
       const row = make('div', 'menu row');
@@ -402,21 +413,21 @@ export class Ui {
       menu.appendChild(this.btn(t('endless.retry'), () => this.actions.restart(), 'btn btn-go', 'againBtn'));
       const row = make('div', 'menu row');
       row.appendChild(this.btn(t('endless.menu'), () => this.actions.quit(), 'btn', 'menuBtn'));
-      if (this.lbEnabled) row.appendChild(this.btn(t('title.board'), () => this.actions.board(), 'btn', 'boardBtn'));
+      if (this.lbEnabled) row.appendChild(this.btn(t('title.board'), () => this.actions.board('over'), 'btn', 'boardBtn'));
       menu.appendChild(row);
       panel.appendChild(menu);
       root.appendChild(panel);
     });
   }
 
-  showBoard(back: () => void): void {
+  showBoard(back: () => void, tab: 'adventure' | 'endless'): void {
     this.open('board', (root) => {
       const panel = make('div', 'panel wide');
       panel.appendChild(this.header(t('lb.title'), back));
       const body = make('div', 'board');
       panel.appendChild(body);
       root.appendChild(panel);
-      this.boardView?.(body);
+      this.boardView?.(body, tab);
     });
   }
 }

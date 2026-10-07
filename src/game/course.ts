@@ -5,6 +5,7 @@ import {
   endlessPitch,
 } from '../../shared/scoreRules';
 import { circleRect } from './collide';
+import { dsin } from './dmath';
 import { CASTLE_GAP, EDGE_MARGIN, GROUND_Y, LEAD_IN, LIP_H, LIP_W, PIPE_W, RUNOUT, START_Y } from './constants';
 import { WHEEL_BALL_R, type Hazard } from './hazards';
 import type { HazardKind, LevelDef } from './levels';
@@ -70,7 +71,7 @@ const NEED: Record<HazardKind, number> = {
 };
 
 export function pipeCenter(p: PipePair, t: number): number {
-  return p.amp === 0 ? p.center : p.center + p.amp * Math.sin((TAU * t) / p.period + p.phase);
+  return p.amp === 0 ? p.center : p.center + p.amp * dsin((TAU * t) / p.period + p.phase);
 }
 
 export function pipeHit(p: PipePair, t: number, x: number, y: number, r: number): boolean {

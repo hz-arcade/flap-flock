@@ -117,6 +117,16 @@ export interface RunEvents {
   theme?(theme: ThemeId): void;
 }
 
+/**
+ * Inputs of one attempt, by physics tick: `p` = presses, `h` = moments the button was pressed
+ * or released (only recorded for a bird that can glide, the only one it matters for).
+ * Ticks count the attempt's flying steps from 1; an input with tick n came in before step n.
+ */
+export interface InputLog {
+  p: number[];
+  h: number[];
+}
+
 interface Saved {
   x: number;
   y: number;
@@ -161,10 +171,16 @@ export class Run {
   result: ClearResult | null = null;
   /** Clock tick of the last flap, for the wing animation. */
   lastFlap = -1000;
+  /** Flying steps in the current attempt; inputs are logged against it. */
+  flyTicks = 0;
   /** Called at the start of every tick; bots press and hold from here. */
   controller: ((run: Run) => void) | null = null;
   events: RunEvents;
   private queued = false;
+  private log: InputLog = { p: [], h: [] };
+  /** Inputs of the attempt that reached the halfway flag, up to that moment. */
+  private cpLog: InputLog | null = null;
+  private fromCheckpoint = false;
   private nextCoin = 0;
   private flagT = 0;
   private acc = 0;
@@ -208,12 +224,28 @@ export class Run {
 
   /** A tap or key press. Starts the run, flaps, or (in a level) restarts after a crash. */
   press(): void {
-    if (this.phase === 'ready' || this.phase === 'playing') this.queued = true;
-    else if (this.mode === 'level' && this.canRetry) this.retry();
+    if (this.phase === 'ready' || this.phase === 'playing') {
+      this.queued = true;
+      this.log.p.push(this.flyTicks + 1);
+    } else if (this.mode === 'level' && this.canRetry) this.retry();
   }
 
   setHeld(held: boolean): void {
+    if (held === this.held) return;
     this.held = held;
+    if (this.phys.glideFall !== null && (this.phase === 'ready' || this.phase === 'playing')) this.log.h.push(this.flyTicks + 1);
+  }
+
+  /**
+   * The inputs behind a cleared level, for the leaderboard to replay: one attempt from the
+   * start, or, after a restart at the halfway flag, the attempt that reached the flag (up to
+   * it) followed by the attempt from there.
+   */
+  replay(): InputLog[] | null {
+    if (!this.result && this.phase !== 'clearing') return null;
+    const upTo = (log: InputLog, n: number): InputLog => ({ p: log.p.filter((t) => t <= n), h: log.h.filter((t) => t <= n) });
+    const last = upTo(this.log, this.flyTicks);
+    return this.fromCheckpoint && this.cpLog ? [this.cpLog, last] : [last];
   }
 
   /** Advance by real elapsed time using fixed steps. */
@@ -265,6 +297,10 @@ export class Run {
     this.nextCoin = cp?.nextCoin ?? 0;
     if (!cp) this.flaps = 0;
     this.queued = false;
+    this.flyTicks = 0;
+    this.fromCheckpoint = !!cp;
+    // A button still held from the last attempt counts as pressed at the first step.
+    this.log = { p: [], h: this.held && this.phys.glideFall !== null ? [1] : [] };
     this.cause = null;
     this.setPhase('ready');
   }
@@ -281,6 +317,7 @@ export class Run {
   }
 
   private fly(): void {
+    this.flyTicks++;
     const b = this.body;
     let flap = false;
     if (this.queued && canFlap(b)) {
@@ -315,6 +352,7 @@ export class Run {
         nextCoin: this.nextCoin,
         coinBits: this.coinBits.slice(),
       };
+      this.cpLog = { p: this.log.p.filter((t) => t <= this.flyTicks), h: this.log.h.filter((t) => t <= this.flyTicks) };
       this.events.checkpoint?.();
     }
     if (hit) {

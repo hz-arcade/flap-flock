@@ -155,3 +155,67 @@ describe('newGameId', () => {
     }
   });
 });
+
+describe('adventure board client', () => {
+  const adv = { now: 1, total: 1, top: [{ id: 7, name: 'Ann', stars: 9, bird: 0, at: 5 }] };
+  const resp = { ok: true, level: { id: '1-1', stars: 3, coins: 11, improved: true }, player: { ...adv.top[0], rank: 1 }, board: adv };
+  const clearReq = { v: 1, key: newGameId(), name: 'Ann', level: '1-1', bird: 0, segs: [{ p: [1, 30], h: [] }] };
+
+  it('fetches the board and submits clears', async () => {
+    let f = reply(200, adv);
+    let c = createClient({ baseUrl: 'https://api.test', fetch: f });
+    expect(await c.fetchAdventure(3)).toEqual({ ok: true, data: adv });
+    expect((f as unknown as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toBe('https://api.test/adventure?limit=3');
+    f = reply(200, resp);
+    c = createClient({ baseUrl: 'https://api.test', fetch: f });
+    expect(await c.submitClear(clearReq)).toEqual({ ok: true, data: resp });
+    const [url, init] = (f as unknown as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(url).toBe('https://api.test/adventure');
+    expect(JSON.parse(init.body)).toEqual(clearReq);
+  });
+
+  it('a refused replay is a final rejection; a wrong shape is a server problem', async () => {
+    let c = createClient({ baseUrl: 'https://api.test', fetch: reply(422, { ok: false, error: 'implausible' }) });
+    expect(await c.submitClear(clearReq)).toEqual({ ok: false, error: 'rejected', retryable: false });
+    c = createClient({ baseUrl: 'https://api.test', fetch: reply(200, { ...resp, player: { id: 1 } }) });
+    expect(await c.submitClear(clearReq)).toEqual({ ok: false, error: 'server', retryable: true });
+  });
+});
+
+describe('stars store', async () => {
+  const { StarsStore } = await import('../src/net/stars');
+  const seg = [{ p: [1, 20], h: [] }];
+
+  it('keeps a stable secret key and the player state', () => {
+    const s = new MemStore();
+    const a = new StarsStore(s);
+    const p = a.player();
+    expect(p.joined).toBe(false);
+    expect(new StarsStore(s).player().key).toBe(p.key);
+    a.updatePlayer({ joined: true, id: 4, stars: 9, rank: 2 });
+    expect(new StarsStore(s).player()).toMatchObject({ key: p.key, joined: true, id: 4, stars: 9, rank: 2 });
+  });
+
+  it('keeps only the best flight per level and tracks what was sent', () => {
+    const st = new StarsStore(new MemStore());
+    expect(st.offer('1-2', { bird: 0, stars: 2, coins: 9, segs: seg })).toBe(true);
+    expect(st.offer('1-1', { bird: 0, stars: 1, coins: 3, segs: seg })).toBe(true);
+    expect(st.pending()).toEqual(['1-1', '1-2']);
+    st.markSent('1-1');
+    expect(st.pending()).toEqual(['1-2']);
+    expect(st.offer('1-2', { bird: 1, stars: 2, coins: 9, segs: seg })).toBe(false);
+    expect(st.offer('1-2', { bird: 1, stars: 2, coins: 10, segs: seg })).toBe(true);
+    expect(st.offer('1-1', { bird: 0, stars: 3, coins: 11, segs: seg })).toBe(true);
+    expect(st.pending()).toEqual(['1-1', '1-2']);
+    expect(st.clears()['1-2']?.bird).toBe(1);
+  });
+
+  it('survives junk in storage', () => {
+    const s = new MemStore();
+    s.setItem('flap-flock.player', '{bad');
+    s.setItem('flap-flock.replays', '{"1-1": {"bird": "x"}, "9-9": {}}');
+    const st = new StarsStore(s);
+    expect(st.player().key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(st.clears()).toEqual({});
+  });
+});

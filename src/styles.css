@@ -848,3 +848,13 @@ body {
   line-height: 1;
   padding: 2px 0;
 }
+.map-board {
+  margin-top: 12px;
+  width: 100%;
+}
+.stars-box {
+  margin-top: 12px;
+}
+.lb-stars {
+  color: var(--gold);
+}

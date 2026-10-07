@@ -3,16 +3,24 @@
  *
  *   GET    /scores?limit=20   → Boards (all-time and this week)
  *   POST   /scores            → SubmitResponse (saved entry, ranks, fresh boards)
+ *   GET    /adventure?limit=20 → AdventureBoard (players by total stars)
+ *   POST   /adventure         → ClearResponse; the clear's inputs are replayed first
  *   DELETE /scores/:id        → admin only; needs the ADMIN_TOKEN secret
  *   GET    /healthz
  *
  * Validation and plausibility rules live in shared/scoreRules.ts so the client and the
  * tests use the very same code. They reject impossible results, floods and duplicates;
  * they cannot prove that a possible result was really played.
+ *
+ * Level clears are stronger: they carry the button presses, and the Worker re-flies them
+ * with the game's own deterministic simulation (src/game/replay.ts). Only what the replay
+ * achieves is stored.
  */
 import { DurableObject } from 'cloudflare:workers';
+import { validateClear, verifyClear } from '../../src/game/replay';
 import {
   BODY_MAX_BYTES,
+  CLEAR_BODY_MAX_BYTES,
   DAY_MS,
   WEEK_MS,
   checkPlausible,
@@ -20,8 +28,11 @@ import {
   validateSubmission,
   weekStart,
   type Board,
+  type AdventureBoard,
   type Boards,
+  type ClearResponse,
   type Entry,
+  type PlayerEntry,
   type ErrorCode,
   type ErrorResponse,
   type SubmitRequest,
@@ -41,6 +52,13 @@ const RATE_PER_WINDOW = 10;
 const RATE_PER_DAY = 60;
 /** Ceiling on new rows per day from everyone together. */
 const INSERTS_PER_DAY = 5000;
+/** Level clears per address (joining uploads up to eight at once). */
+const CLEAR_RATE_PER_WINDOW = 40;
+const CLEAR_RATE_PER_DAY = 400;
+/** Ceiling on new adventure players per day. */
+const PLAYERS_PER_DAY = 2000;
+/** Players kept on the adventure board. */
+const KEEP_PLAYERS = 3000;
 /** Rows kept: the best of all time, and the best of this week and last week. */
 const KEEP_ALL = 1000;
 const KEEP_WEEK = 5000;
@@ -120,6 +138,45 @@ export default {
         return removed ? json({ ok: true }) : fail('not-found', 404, {});
       }
 
+      if (url.pathname === '/adventure') {
+        if (req.method === 'GET') {
+          if (req.headers.has('origin') && !origin) return fail('origin', 403, {});
+          return json(await board.adventure(clampLimit(url.searchParams.get('limit'))), 200, headers);
+        }
+        if (req.method !== 'POST') return fail('not-found', 405, { ...headers, allow: 'GET, POST, OPTIONS' });
+        if (!origin) return fail('origin', 403, {});
+        const declared = Number(req.headers.get('content-length') ?? '0');
+        if (declared > CLEAR_BODY_MAX_BYTES) return fail('too-large', 413, headers);
+        const text = await req.text();
+        if (new TextEncoder().encode(text).length > CLEAR_BODY_MAX_BYTES) return fail('too-large', 413, headers);
+        let body: unknown;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          return fail('bad-json', 400, headers);
+        }
+        const checked = validateClear(body);
+        if (!checked.ok) return fail('invalid', 400, headers, { field: checked.field });
+        const { value } = checked;
+        // Re-fly the clear. Only what the replay achieves counts.
+        const verdict = verifyClear(value.level, value.bird, checked.logs);
+        if (!verdict.ok) {
+          console.log(JSON.stringify({ event: 'replay-failed', reason: verdict.reason, level: value.level, bird: value.bird }));
+          return fail('implausible', 422, headers);
+        }
+        const ip = req.headers.get('cf-connecting-ip') ?? 'unknown';
+        const result = await board.submitClear(
+          { pid: await sha256(value.key), name: value.name, level: value.level, bird: value.bird, stars: verdict.stars, coins: verdict.coins },
+          addressKey(ip),
+          clampLimit(url.searchParams.get('limit')),
+        );
+        if (result.ok) return json(result, 200, headers);
+        if (result.error === 'rate') {
+          return fail('rate', 429, { ...headers, 'retry-after': String(result.retryAfter ?? 600) }, { retryAfter: result.retryAfter });
+        }
+        return fail(result.error, 503, headers);
+      }
+
       if (url.pathname !== '/scores') return fail('not-found', 404, headers);
 
       if (req.method === 'GET') {
@@ -167,8 +224,26 @@ export default {
 
 type Row = Record<string, SqlStorageValue>;
 
+function toPlayer(r: Row): PlayerEntry {
+  return { id: Number(r.id), name: String(r.name), stars: Number(r.stars), bird: Number(r.bird), at: Number(r.at) };
+}
+
+export interface VerifiedClear {
+  /** Hash of the player's device key. */
+  pid: string;
+  name: string;
+  level: string;
+  bird: number;
+  stars: number;
+  coins: number;
+}
+
 function toEntry(r: Row): Entry {
   return { id: Number(r.id), name: String(r.name), score: Number(r.score), at: Number(r.at), bird: Number(r.bird) };
+}
+
+async function sha256(text: string): Promise<string> {
+  return hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
 }
 
 function hex(buf: ArrayBuffer): string {
@@ -203,6 +278,26 @@ export class Scoreboard extends DurableObject<Env> {
         PRIMARY KEY (ip, win)
       ) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) WITHOUT ROWID;
+      CREATE TABLE IF NOT EXISTS players (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pid TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        stars INTEGER NOT NULL,
+        bird INTEGER NOT NULL,
+        at INTEGER NOT NULL,
+        seen INTEGER NOT NULL,
+        joined INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS players_rank ON players(stars DESC, at, id);
+      CREATE TABLE IF NOT EXISTS clears (
+        pid TEXT NOT NULL,
+        level TEXT NOT NULL,
+        stars INTEGER NOT NULL,
+        coins INTEGER NOT NULL,
+        bird INTEGER NOT NULL,
+        at INTEGER NOT NULL,
+        PRIMARY KEY (pid, level)
+      ) WITHOUT ROWID;
     `);
   }
 
@@ -303,6 +398,80 @@ export class Scoreboard extends DurableObject<Env> {
     return this.respond(row, false, limit, now);
   }
 
+  // ---- Adventure board ----
+
+  async adventure(limit: number, now = Date.now()): Promise<AdventureBoard> {
+    return {
+      now,
+      total: this.count('SELECT COUNT(*) AS n FROM players'),
+      top: this.sql.exec('SELECT id, name, stars, bird, at FROM players ORDER BY stars DESC, at, id LIMIT ?', limit).toArray().map(toPlayer),
+    };
+  }
+
+  /** 1-based position: more stars first, then whoever reached that total first. */
+  private playerRank(p: PlayerEntry): number {
+    return 1 + this.count('SELECT COUNT(*) AS n FROM players WHERE stars > ?1 OR (stars = ?1 AND (at < ?2 OR (at = ?2 AND id < ?3)))', p.stars, p.at, p.id);
+  }
+
+  /** Rate limit shared by the window and the day; returns seconds to wait, or 0. */
+  private async limited(address: string, tag: string, perWindow: number, perDay: number, now: number): Promise<number> {
+    const day = Math.floor(now / DAY_MS);
+    const ip = (await sha256(`${this.salt(day)}|${address}|${tag}`)).slice(0, 16);
+    const win = Math.floor(now / RATE_WINDOW_MS);
+    const firstWinOfDay = Math.floor((day * DAY_MS) / RATE_WINDOW_MS);
+    if (this.count('SELECT COALESCE(SUM(n), 0) AS n FROM rate WHERE ip = ? AND win = ?', ip, win) >= perWindow) return Math.ceil(((win + 1) * RATE_WINDOW_MS - now) / 1000);
+    if (this.count('SELECT COALESCE(SUM(n), 0) AS n FROM rate WHERE ip = ? AND win >= ?', ip, firstWinOfDay) >= perDay) return Math.ceil(((day + 1) * DAY_MS - now) / 1000);
+    this.sql.exec('INSERT INTO rate (ip, win, n) VALUES (?, ?, 1) ON CONFLICT (ip, win) DO UPDATE SET n = n + 1', ip, win);
+    return 0;
+  }
+
+  async submitClear(c: VerifiedClear, address: string, limit: number): Promise<ClearResponse | { ok: false; error: 'rate' | 'busy'; retryAfter?: number }> {
+    const now = Date.now();
+    const wait = await this.limited(address, 'clear', CLEAR_RATE_PER_WINDOW, CLEAR_RATE_PER_DAY, now);
+    if (wait) return { ok: false, error: 'rate', retryAfter: wait };
+
+    let player = this.sql.exec('SELECT * FROM players WHERE pid = ?', c.pid).toArray()[0];
+    if (!player) {
+      const day = Math.floor(now / DAY_MS);
+      if (this.count('SELECT COUNT(*) AS n FROM players WHERE joined >= ?', day * DAY_MS) >= PLAYERS_PER_DAY) {
+        return { ok: false, error: 'busy' };
+      }
+    }
+
+    // Keep the best clear of each level: more stars, then more coins.
+    const old = this.sql.exec('SELECT stars, coins FROM clears WHERE pid = ? AND level = ?', c.pid, c.level).toArray()[0];
+    const improved = !old || c.stars > Number(old.stars) || (c.stars === Number(old.stars) && c.coins > Number(old.coins));
+    if (improved) {
+      this.sql.exec(
+        'INSERT INTO clears (pid, level, stars, coins, bird, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (pid, level) DO UPDATE SET stars = excluded.stars, coins = excluded.coins, bird = excluded.bird, at = excluded.at',
+        c.pid,
+        c.level,
+        c.stars,
+        c.coins,
+        c.bird,
+        now,
+      );
+    }
+    const total = this.count('SELECT COALESCE(SUM(stars), 0) AS n FROM clears WHERE pid = ?', c.pid);
+    if (!player) {
+      this.sql.exec('INSERT INTO players (pid, name, stars, bird, at, seen, joined) VALUES (?, ?, ?, ?, ?, ?, ?)', c.pid, c.name, total, c.bird, now, now, now);
+    } else if (total > Number(player.stars)) {
+      this.sql.exec('UPDATE players SET name = ?, stars = ?, bird = ?, at = ?, seen = ? WHERE pid = ?', c.name, total, c.bird, now, now, c.pid);
+    } else {
+      this.sql.exec('UPDATE players SET name = ?, seen = ? WHERE pid = ?', c.name, now, c.pid);
+    }
+    player = this.sql.exec('SELECT id, name, stars, bird, at FROM players WHERE pid = ?', c.pid).one();
+    const entry = toPlayer(player);
+    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(now + DAY_MS);
+    const best = this.sql.exec('SELECT stars, coins FROM clears WHERE pid = ? AND level = ?', c.pid, c.level).one();
+    return {
+      ok: true,
+      level: { id: c.level, stars: Number(best.stars), coins: Number(best.coins), improved },
+      player: { ...entry, rank: this.playerRank(entry) },
+      board: await this.adventure(limit, now),
+    };
+  }
+
   async remove(id: number): Promise<boolean> {
     const before = this.count('SELECT COUNT(*) AS n FROM scores WHERE id = ?', id);
     if (before === 0) return false;
@@ -327,6 +496,11 @@ export class Scoreboard extends DurableObject<Env> {
       lastWeek,
     );
     this.sql.exec('DELETE FROM rate WHERE win < ?', Math.floor((now - DAY_MS) / RATE_WINDOW_MS));
+    // Adventure: keep the best players and their clears.
+    if (this.count('SELECT COUNT(*) AS n FROM players') > KEEP_PLAYERS) {
+      this.sql.exec('DELETE FROM players WHERE id NOT IN (SELECT id FROM players ORDER BY stars DESC, at, id LIMIT ?)', KEEP_PLAYERS);
+      this.sql.exec('DELETE FROM clears WHERE pid NOT IN (SELECT pid FROM players)');
+    }
   }
 
   override async alarm(): Promise<void> {
