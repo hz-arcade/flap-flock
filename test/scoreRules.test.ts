@@ -131,6 +131,14 @@ describe('checkPlausible', () => {
   ])('rejects %s', (rule, r) => {
     expect(checkPlausible(r)).toBe(rule);
   });
+  it('accepts the fixtures used by scripts/scores-e2e.mjs', () => {
+    const RUNS: Record<number, number> = { 10: 28, 20: 50, 30: 69, 50: 101 };
+    for (const [score, secs] of Object.entries(RUNS)) {
+      for (const bird of [0, 2]) expect(checkPlausible({ score: Number(score), secs, flaps: secs * 2, bird }), score).toBeNull();
+    }
+    expect(checkPlausible({ score: 50, secs: RUNS[20]!, flaps: 100, bird: 0 })).toBe('too-fast');
+    expect(checkPlausible({ score: 20, secs: RUNS[20]!, flaps: 5000, bird: 0 })).toBe('flaps-per-second');
+  });
   it('the time window is tight: one pipe more or less does not fit', () => {
     const secs = secsFor(40);
     expect(checkPlausible({ score: 40, secs, flaps: 90, bird: 0 })).toBeNull();

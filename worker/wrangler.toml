@@ -1,0 +1,21 @@
+name = "flap-flock-scores"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+workers_dev = true
+
+[vars]
+# Comma-separated list of origins allowed to read and submit scores.
+# The game lives at arcade.hz.ax only.
+ALLOWED_ORIGINS = "https://arcade.hz.ax"
+# Local development only (`npm run scores:dev` turns it on).
+ALLOW_LOCALHOST = "false"
+
+[durable_objects]
+bindings = [{ name = "SCORES", class_name = "Scoreboard" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Scoreboard"]
+
+[observability]
+enabled = true

@@ -29,7 +29,7 @@ export interface Bird {
 export const BIRDS: Record<BirdId, Bird> = {
   duck: { id: 'duck', gravity: 900, flap: 250, maxFall: 270, radius: 5.5, cooldown: 0.1, speedMul: 1, unlockWorld: 0 },
   chicken: { id: 'chicken', gravity: 1250, flap: 290, maxFall: 380, radius: 6, cooldown: 0.1, speedMul: 1, unlockWorld: 0 },
-  pelican: { id: 'pelican', gravity: 700, flap: 215, maxFall: 240, radius: 7.5, cooldown: 0.1, speedMul: 1, glideFall: 60, unlockWorld: 0 },
+  pelican: { id: 'pelican', gravity: 700, flap: 215, maxFall: 240, radius: 7, cooldown: 0.1, speedMul: 1, glideFall: 60, unlockWorld: 0 },
   sparrow: { id: 'sparrow', gravity: 1500, flap: 300, maxFall: 380, radius: 3.5, cooldown: 0.08, speedMul: 1, unlockWorld: 1 },
   penguin: { id: 'penguin', gravity: 1250, flap: 250, maxFall: 400, radius: 7, cooldown: 0.2, speedMul: 1, swimmer: true, unlockWorld: 2 },
   eagle: { id: 'eagle', gravity: 1100, flap: 280, maxFall: 360, radius: 6, cooldown: 0.1, speedMul: SPEED_MULS[5] ?? 1.1, unlockWorld: 3 },

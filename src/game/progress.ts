@@ -33,6 +33,8 @@ export const KEYS = {
 } as const;
 
 export interface ClearOutcome {
+  /** The level had not been cleared before. */
+  first: boolean;
   /** Stars, coins or time improved. */
   improved: boolean;
   /** Birds this clear unlocked. */
@@ -184,6 +186,7 @@ export class Progress {
     this.data.levels[result.levelId] = merged;
     this.write(KEYS.progress, this.data);
     return {
+      first: !old,
       improved,
       newBirds: BIRD_ORDER.filter((b) => this.isBirdOpen(b) && !birdsBefore.includes(b)),
       opened: next && !wasOpen && this.isLevelOpen(next.id) ? next : null,
