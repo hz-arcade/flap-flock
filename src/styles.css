@@ -123,6 +123,9 @@ body {
 .ico-pause {
   --ico: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8' shape-rendering='crispEdges'%3E%3Cpath d='M1 1h2v6H1zM5 1h2v6H5z'/%3E%3C/svg%3E");
 }
+.ico-back {
+  --ico: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8' shape-rendering='crispEdges'%3E%3Cpath d='M3 1h1v1H3zM2 2h2v1H2zM1 3h6v2H1zM2 5h2v1H2zM3 6h1v1H3z'/%3E%3C/svg%3E");
+}
 
 /* ---- Banner (Get Ready) ---- */
 .banner {
@@ -376,6 +379,46 @@ body {
 }
 .keys {
   opacity: 0.85;
+}
+/* Back to the HZ Arcade catalog: a small chip in the top-left, mirroring the corner buttons and
+   sitting in the screen's top padding so it never covers the menu. */
+.arcade-link {
+  position: absolute;
+  top: calc(var(--sat) + 8px);
+  left: calc(var(--sal) + 8px);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  /* Leave room for the language and sound buttons on the right. */
+  max-width: calc(100% - var(--sal) - var(--sar) - 110px);
+  padding: 0 10px 0 8px;
+  border: 2px solid var(--ink);
+  background: rgba(252, 252, 252, 0.92);
+  color: var(--ink);
+  box-shadow: 0 3px 0 var(--ink);
+  font: 10px / 1.2 var(--pixel);
+  text-transform: uppercase;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.arcade-link .ico {
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+.arcade-link span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.arcade-link:active {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 var(--ink);
+}
+.arcade-link:focus-visible {
+  outline: 3px solid var(--gold);
+  outline-offset: 2px;
 }
 
 /* ---- Birds ---- */

@@ -14,6 +14,7 @@ export const zhTW: Strings = {
   'title.endless': '無盡模式',
   'title.birds': '選鳥',
   'title.board': '排行榜',
+  'title.arcade': '返回遊戲廳',
   'title.stars': '已得 {n}/{total} 顆星',
   'title.keys': '輕點螢幕、點擊滑鼠或按空白鍵撲翅',
   'map.title': '世界地圖',

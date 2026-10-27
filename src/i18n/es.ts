@@ -14,6 +14,7 @@ export const es: Strings = {
   'title.endless': 'Infinito',
   'title.birds': 'Pájaros',
   'title.board': 'Clasificación',
+  'title.arcade': 'Volver al arcade',
   'title.stars': '{n} de {total} estrellas',
   'title.keys': 'Toca, haz clic o pulsa Espacio para aletear',
   'map.title': 'Mapa del mundo',

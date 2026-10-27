@@ -12,6 +12,7 @@ export const en = {
   'title.endless': 'Endless',
   'title.birds': 'Birds',
   'title.board': 'Leaderboard',
+  'title.arcade': 'Back to arcade',
   'title.stars': '{n} of {total} stars',
   'title.keys': 'Tap, click or press Space to flap',
   'map.title': 'World map',

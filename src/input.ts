@@ -44,8 +44,9 @@ export function bindInput(area: HTMLElement, actions: InputActions): void {
     const tag = target?.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return;
     if (FLAP_KEYS.has(ev.code)) {
-      // Space/Enter on a focused button activates the button instead.
-      if ((ev.code === 'Space' || ev.code === 'Enter' || ev.code === 'NumpadEnter') && tag === 'BUTTON') return;
+      // Space/Enter on a focused button or link (the arcade link on the title) activates it instead:
+      // no flap, and no preventDefault, which would cancel the link's navigation.
+      if ((ev.code === 'Space' || ev.code === 'Enter' || ev.code === 'NumpadEnter') && (tag === 'BUTTON' || tag === 'A')) return;
       ev.preventDefault();
       if (!ev.repeat) {
         keys.add(ev.code);

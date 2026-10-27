@@ -165,6 +165,14 @@ export class Ui {
       if (started) box.appendChild(make('p', 'small', `★ ${t('title.stars', { n: this.progress.totalStars, total: LEVELS.length * 3 })}`));
       box.appendChild(make('p', 'small keys', t('title.keys')));
       root.appendChild(box);
+      // A plain link back to the HZ Arcade catalog at the site root (top-left, opposite the corner
+      // buttons). After the menu in the DOM so Tab reaches the play buttons first.
+      const arcade = make('a', 'arcade-link');
+      arcade.href = '/';
+      arcade.id = 'arcadeLink';
+      arcade.appendChild(make('span', 'ico ico-back')).setAttribute('aria-hidden', 'true');
+      arcade.appendChild(make('span', '', t('title.arcade')));
+      root.appendChild(arcade);
     });
   }
 

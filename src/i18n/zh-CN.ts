@@ -14,6 +14,7 @@ export const zhCN: Strings = {
   'title.endless': '无尽模式',
   'title.birds': '选鸟',
   'title.board': '排行榜',
+  'title.arcade': '返回游戏厅',
   'title.stars': '已得 {n}/{total} 颗星',
   'title.keys': '轻点屏幕、点击鼠标或按空格键扑翅',
   'map.title': '世界地图',
